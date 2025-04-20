@@ -1,3 +1,0 @@
-/home/likura/sys-prog-5/.build/CMakeFiles/utility.dir
-/home/likura/sys-prog-5/.build/CMakeFiles/edit_cache.dir
-/home/likura/sys-prog-5/.build/CMakeFiles/rebuild_cache.dir
