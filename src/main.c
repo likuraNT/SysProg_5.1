@@ -1,94 +1,89 @@
 #include "game.h"
 
-#define MAX_GAMES 15
+volatile sig_atomic_t guess_num = 0;            
+volatile sig_atomic_t attempts = 0;                 
+volatile sig_atomic_t finish = 0;               
+volatile sig_atomic_t curr_guess = 0;             
+volatile sig_atomic_t bytes_received = 0;
 
-volatile sig_atomic_t targ;
-volatile sig_atomic_t guess;
-volatile sig_atomic_t player;
-volatile sig_atomic_t finish;
-volatile sig_atomic_t attempts;
+pid_t child_pid;
 
-void p1_handler(int sgnl, siginfo_t* info, void* non_usable_param)
-{
-    if (sgnl == SIGUSR1) {
-        guess = info->si_value.sival_int;
-        if (guess == targ) {
-            kill(info->si_pid, SIGUSR1);
-            finish = 1;                                             // finishing game
+void p1_handler(int sig, siginfo_t *info, void *non_usable_param) {
+    if (sig == SIGRTMIN) {
+        curr_guess = info->si_value.sival_int;
+        ++attempts;                                
+
+        if (curr_guess == guess_num) {
+            union sigval value;
+            value.sival_int = 1;
+            sigqueue(child_pid, SIGUSR1, value);
+            finish = 1;
         } else {
-            kill(info->si_pid, SIGUSR2);
+            union sigval value;
+            value.sival_int = 0;
+            sigqueue(child_pid, SIGUSR2, value);
         }
-        ++attempts;
+    }
+}
+
+void p2_handler(int sig, siginfo_t *info, void *non_usable_param) {
+    bytes_received = 1;
+
+    if (sig == SIGUSR1) {
+        fprintf(stdout, "Right! After %d tries\n", attempts);
+        finish = 1; 
+    } 
+    else if (sig == SIGUSR2) {
+        fprintf(stdout, "Incorrect %d. Let's try again\n", curr_guess);
     }
 }
 
-void p2_handler(int sgnl, siginfo_t* info, void* non_usable_param)
-{
-    if (sgnl == SIGUSR1) {
-        finish = 1;                                                 // finishing game
-    }
+void termination(int sig) {
+    fprintf(stdout, "Ended game by signal\n");
+    exit(0);
 }
 
-void sending_guess(pid_t pid, int value)
-{
-    union sigval val;
-    val.sival_int = value;
-    sigqueue(pid, SIGUSR1, val);
+void handler_setup() {
+    struct sigaction sa;
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_sigaction = p1_handler; 
+    sigaction(SIGRTMIN, &sa, 0);
+    sa.sa_sigaction = p2_handler;
+    sigaction(SIGUSR1, &sa, 0);
+    sigaction(SIGUSR2, &sa, 0);
+    signal(SIGTERM, termination);
 }
 
-void handler_setup(void (*handler)(int, siginfo_t*, void*), int sgnl)
-{
-    struct sigaction su;
-    memset(&su, 0, sizeof(su));
-    su.sa_flags = SA_SIGINFO;
-    su.sa_sigaction = handler;
-    sigset_t su_set;
-    sigemptyset(&su_set);
-    sigaddset(&su_set, SIGUSR1);
-    sigaddset(&su_set, SIGUSR2);
-    su.sa_mask = su_set;
-    sigaction(sgnl, &su, 0);
-    sigaction(SIGUSR2, &su, 0);
-}
+void p1_play(int max_number) {
+    int guess;
+    srand(time(NULL) ^ getpid());
 
-void _game(int N, int cur_player)
-{
-    pid_t pid = getpid();
-    pid_t ppid = cur_player? player : getppid();
-
-    if (cur_player) {
-        targ = rand()%(N+1);
-        if (targ == 0) targ = 1;
-        fprintf(stdout, "P1 (PID %i) you must choose a number from 1 to %i\n)", pid, N);
-
-        finish = 0;
-        attempts = 0;
-
-        kill(ppid, SIGUSR1);
-
-        while(finish != 1) {
-            sigset_t mask;
-            sigemptyset(&mask);
-            sigsuspend(&mask);
-        }
-
-        fprintf(stdout, "P2 guessed the num %i in %i attempts\n", targ, attempts);
-    } else {
-        int cur_guess = -1;
-        attempts = 0;
-
-        while(finish != 1) {
-            cur_guess = rand() % (N + 1);
-            if (cur_guess == 0) cur_guess = 1;
-            fprintf(stdout, "P2 (PID %i) guess: %i\n", getpid(), cur_guess);
-            sending_guess(ppid, cur_guess);
-
-            sigset_t mask;
-            sigemptyset(&mask);
-            sigsuspend(&mask);
-
+    while (!finish) {
+        guess = rand() % (max_number + 1);
+        fprintf(stdout, "Trying: %d...\n", guess);
+        union sigval value;
+        value.sival_int = guess;
+        bytes_received = 0;
+        sigqueue(child_pid, SIGRTMIN, value);
+        while (!bytes_received) {
+            pause();
         }
     }
+}
+
+void p2_play(int max_number) {
+    srand(time(NULL) ^ getpid());
+    guess_num = rand() % (max_number + 1);
+    fprintf(stdout, "I choose num between 1 to %d\n", max_number);
+    while (!finish) {
+        pause();
+    }
+    fprintf(stdout,"Previous num is: %d. Round ended\n", guess_num);
+}
+
+unsigned long difference_time(struct timeval start, struct timeval end) {
+    return (end.tv_sec - start.tv_sec) * 1000 + (end.tv_usec - start.tv_usec) / 1000;
 }
 
 int set_N(int arg, char* argv[])
@@ -107,43 +102,68 @@ int set_N(int arg, char* argv[])
     return abs(N);
 }
 
-int main(int argc, char* argv[])
-{
+
+int main(int argc, char *argv[]) {
     int N = set_N(argc, argv);
-    srand(time(NULL));
 
     pid_t pid = fork();
-    if (pid < 0) {
-        perror("Fork creation failed");
-        exit(EXIT_FAILURE);
-    }
+    pid_t self_pid = getpid();
 
-    else if (pid == 0) {
-        handler_setup(p2_handler, SIGUSR1);
-        handler_setup(p2_handler, SIGUSR2);
+    if (pid == 0) {
+        handler_setup();
+        child_pid = getppid(); 
 
-        for (int i = 0; i < MAX_GAMES; ++i)
-        {
-            finish = 0;
-            player = getpid();
-            _game(N, 0);
-        }
-
-        exit(EXIT_SUCCESS);
-    } else {
-        handler_setup(p1_handler, SIGUSR1);
-        handler_setup(p1_handler, SIGUSR2);
-        player = pid;
-
-        for (int i = 0; i < MAX_GAMES; ++i)
-        {
+        for (int i = 0; i < 10; ++i) { 
             finish = 0;
             attempts = 0;
-            _game(N, 1);
+
+            struct timeval start, end;
+            gettimeofday(&start, 0); 
+
+            fprintf(stdout, "\n[Round %d] ", i + 1);
+            if (i % 2 == 1) {
+                fprintf(stdout, "Child is choosing the number\n");
+                p1_play(N);
+            } else {
+                fprintf(stdout,"Child is guessing\n");
+                p2_play(N);
+            }
+
+            gettimeofday(&end, NULL);
+            long duration = difference_time(start, end);
+            fprintf(stdout, "[Round %d] Current time: %ld ms\n", i + 1, duration);
         }
 
-        kill(pid, SIGTERM);
-        wait(NULL);
+        exit(0);
+    } else {
+        handler_setup();
+        child_pid = pid;
+
+        for (int i = 0; i < 10; ++i) {
+            finish = 0;
+            attempts = 0;
+
+            struct timeval start, end;
+            gettimeofday(&start, NULL);
+
+            fprintf(stdout,"\n[Round %d] ", i + 1);
+            if (i % 2 == 0) {
+                fprintf(stdout, "Parent is choosing the number\n");
+                p1_play(N);
+            } else {
+                fprintf(stdout, "Parent is guessing\n");
+                p2_play(N);
+            }
+
+            gettimeofday(&end, NULL);
+            long duration = difference_time(start, end);
+            fprintf(stdout,"[Round %d] Current time: %ld ms\n", i + 1, duration);
+        }
+
+        kill(pid, SIGTERM); 
+        waitpid(pid, NULL, 0);
+
+        fprintf(stdout, "Game over\n");
     }
 
     return 0;

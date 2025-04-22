@@ -1,22 +1,27 @@
 #pragma once
 
-#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
 #include <signal.h>
-#include <sys/wait.h>
+#include <time.h>
 #include <sys/types.h>
+#include <sys/wait.h>
+#include <stdbool.h>
+#include <sys/time.h>
 
-void p2_handler(int sgnl, siginfo_t* info, void* non_usable_param);
+void p1_handler(int, siginfo_t*, void*);
 
-void p2_handler(int sgnl, siginfo_t* info, void* non_usable_param);
+void p2_handler(int, siginfo_t*, void*);
 
-void sending_guess(pid_t pid, int value);
+void termination(int);
 
-void handler_setup(void (*handler)(int, siginfo_t*, void*), int sgnl);
+void handler_setup();
 
-void _game(int N, int cur_player);
+void p1_play();
 
-int set_N(int arg, char* argv[]);
+void p2_play();
+
+unsigned long difference_time(struct timeval, struct timeval);
+
+int set_N(int, char**);
